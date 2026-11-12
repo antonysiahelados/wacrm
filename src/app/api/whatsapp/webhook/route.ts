@@ -12,6 +12,13 @@ import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
 import {
+  parseEchoes,
+  extractReferencias,
+  recentCustomerText,
+  buildAgentEventData,
+  type Echo,
+} from '@/lib/whatsapp/echo'
+import {
   handleTemplateWebhookChange,
   isTemplateWebhookField,
 } from '@/lib/whatsapp/template-webhook'
@@ -246,6 +253,14 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
 
       const value = change.value
 
+      // Coexistence: what the team typed on the phone app. Meta sends it on
+      // its own change.field with a `message_echoes` array instead of
+      // `messages`, so it never reaches the inbound branch below.
+      if (change.field === 'smb_message_echoes') {
+        await handleEchoes(value as unknown)
+        continue
+      }
+
       // Handle status updates
       if (value.statuses) {
         for (const status of value.statuses) {
@@ -320,6 +335,118 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
       }
     }
   }
+}
+
+/**
+ * Persist the team's phone-app messages and tell subscribers.
+ *
+ * Each echo is stored as an `agent` message (idempotent on
+ * conversation_id + message_id, like inbound) and, only on the first
+ * delivery, fans out `message.sent_by_agent` with the order references
+ * and the customer's last-24h text — enough for an external system to
+ * react to words like "confirmado" without querying wacrm back.
+ */
+async function handleEchoes(value: unknown) {
+  const echoes = parseEchoes(value)
+  if (echoes.length === 0) return
+
+  const phoneNumberId = (
+    value as { metadata?: { phone_number_id?: string } } | null
+  )?.metadata?.phone_number_id
+  if (!phoneNumberId) return
+
+  const { data: configRows, error: configError } = await supabaseAdmin()
+    .from('whatsapp_config')
+    .select('account_id, user_id')
+    .eq('phone_number_id', phoneNumberId)
+  if (configError || !configRows || configRows.length !== 1) {
+    console.error(
+      '[webhook] echo dropped: no single config for phone_number_id',
+      phoneNumberId
+    )
+    return
+  }
+  const { account_id: accountId, user_id: ownerId } = configRows[0] as {
+    account_id: string
+    user_id: string
+  }
+
+  for (const echo of echoes) {
+    await processEcho(echo, accountId, ownerId)
+  }
+}
+
+async function processEcho(echo: Echo, accountId: string, ownerId: string) {
+  const contactOutcome = await findOrCreateContact(
+    accountId,
+    ownerId,
+    echo.to,
+    ''
+  )
+  if (!contactOutcome) return
+  const contact = contactOutcome.contact
+
+  const convResult = await findOrCreateConversation(
+    accountId,
+    ownerId,
+    contact.id
+  )
+  if (!convResult) return
+  const conversation = convResult.conversation
+
+  const { data: inserted, error } = await supabaseAdmin()
+    .from('messages')
+    .upsert(
+      {
+        conversation_id: conversation.id,
+        sender_type: 'agent',
+        content_type: 'text',
+        content_text: echo.text,
+        message_id: echo.id,
+        status: 'sent',
+        created_at: new Date(
+          (echo.timestamp || Math.floor(Date.now() / 1000)) * 1000
+        ).toISOString(),
+      },
+      { onConflict: 'conversation_id,message_id', ignoreDuplicates: true }
+    )
+    .select('id')
+  if (error) {
+    console.error('Error inserting echo message:', error)
+    return
+  }
+  // Replay of a delivery we already handled: no second event.
+  if (!inserted || inserted.length === 0) return
+
+  const nowMs = Date.now()
+  const { data: recent } = await supabaseAdmin()
+    .from('messages')
+    .select('content_text, created_at')
+    .eq('conversation_id', conversation.id)
+    .eq('sender_type', 'customer')
+    .gte('created_at', new Date(nowMs - 24 * 60 * 60 * 1000).toISOString())
+    .order('created_at', { ascending: false })
+    .limit(10)
+  const rows = (recent ?? []) as Array<{
+    content_text: string | null
+    created_at: string
+  }>
+
+  await dispatchWebhookEvent(
+    supabaseAdmin(),
+    accountId,
+    'message.sent_by_agent',
+    buildAgentEventData({
+      echo,
+      conversationId: conversation.id,
+      contactId: contact.id,
+      contactName: contact.name ?? '',
+      referencias: extractReferencias(
+        rows.map((r) => r.content_text ?? '')
+      ),
+      customerText: recentCustomerText(rows.slice(0, 5), nowMs),
+    })
+  )
 }
 
 // The happy-path status ladder — pending → sent → delivered → read →
