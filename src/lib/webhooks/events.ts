@@ -12,6 +12,7 @@ export const WEBHOOK_EVENTS = [
   'message.status_updated', // a sent message advanced (sent/delivered/read)
   'conversation.created', // a new conversation was opened for a contact
   'message.sent_by_agent', // the team typed a message from the phone app (coexistence echo)
+  'payment.proof_received', // a customer image was read as a payment receipt
 ] as const;
 
 export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
@@ -24,6 +25,8 @@ export const WEBHOOK_EVENT_DESCRIPTIONS: Record<WebhookEvent, string> = {
   'conversation.created': 'A new conversation was opened',
   'message.sent_by_agent':
     'The team sent a message from the WhatsApp Business app on the phone',
+  'payment.proof_received':
+    'A customer sent an image that was read as a payment receipt (amount, date, recipient)',
 };
 
 /** Type-narrow an unknown value into a valid `WebhookEvent`. */
