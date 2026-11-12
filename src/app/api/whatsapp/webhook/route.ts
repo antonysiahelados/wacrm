@@ -11,6 +11,7 @@ import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
+import { readProof, buildProofEventData } from '@/lib/whatsapp/proof'
 import {
   parseEchoes,
   extractReferencias,
@@ -447,6 +448,75 @@ async function processEcho(echo: Echo, accountId: string, ownerId: string) {
       customerText: recentCustomerText(rows.slice(0, 5), nowMs),
     })
   )
+}
+
+// A customer image might be a bank-transfer receipt. When GEMINI_API_KEY is
+// set, the image is read once; if it looks like a receipt, a
+// `payment.proof_received` event goes out with what was read (the site
+// decides whether it matches an order). Best effort: any failure is logged
+// without customer data and never breaks the webhook.
+async function handleProofImage(args: {
+  accountId: string
+  accessToken: string
+  mediaId: string
+  caption: string
+  messageId: string
+  conversationId: string
+  contactId: string
+  phone: string
+}): Promise<void> {
+  const apiKey = process.env.GEMINI_API_KEY
+  if (!apiKey) return
+  try {
+    const info = await getMediaUrl({ mediaId: args.mediaId, accessToken: args.accessToken })
+    const { buffer, contentType } = await downloadMedia({
+      downloadUrl: info.url,
+      accessToken: args.accessToken,
+    })
+    const today = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Argentina/Buenos_Aires',
+    }).format(new Date())
+    const proof = await readProof({
+      apiKey,
+      image: buffer,
+      mimeType: (info.mimeType || contentType || '').split(';')[0].trim(),
+      today,
+    })
+    if (!proof || !proof.parece_comprobante) return
+
+    const { data: recent } = await supabaseAdmin()
+      .from('messages')
+      .select('content_text, created_at')
+      .eq('conversation_id', args.conversationId)
+      .eq('sender_type', 'customer')
+      .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+      .order('created_at', { ascending: false })
+      .limit(10)
+    const texts = [
+      args.caption,
+      ...((recent ?? []) as Array<{ content_text: string | null }>).map(
+        (r) => r.content_text ?? ''
+      ),
+    ]
+    await dispatchWebhookEvent(
+      supabaseAdmin(),
+      args.accountId,
+      'payment.proof_received',
+      buildProofEventData({
+        messageId: args.messageId,
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        phone: args.phone,
+        referencias: extractReferencias(texts),
+        proof,
+      })
+    )
+  } catch (error) {
+    console.error(
+      '[webhook] payment proof read failed:',
+      error instanceof Error ? error.message : 'unknown'
+    )
+  }
 }
 
 // The happy-path status ladder — pending → sent → delivered → read →
@@ -1021,6 +1091,20 @@ async function processMessage(
     content_type: contentType,
     text: contentText,
   })
+
+  // Possible transfer receipt (see handleProofImage).
+  if (message.type === 'image' && message.image?.id) {
+    await handleProofImage({
+      accountId,
+      accessToken,
+      mediaId: message.image.id,
+      caption: message.image.caption ?? '',
+      messageId: message.id,
+      conversationId: conversation.id,
+      contactId: contactRecord.id,
+      phone: message.from,
+    })
+  }
 }
 
 async function parseMessageContent(
