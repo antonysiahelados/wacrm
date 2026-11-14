@@ -76,9 +76,19 @@ describe('recentCustomerText', () => {
     expect(recentCustomerText(filas, now)).toBe('primer mensaje\nsegundo mensaje');
   });
 
-  it('caps the length at 1000 characters', () => {
-    const largo = [{ content_text: 'x'.repeat(3000), created_at: '2026-11-11T21:50:00Z' }];
-    expect(recentCustomerText(largo, now)).toHaveLength(1000);
+  it('caps the length at 3000 characters', () => {
+    const largo = [{ content_text: 'x'.repeat(5000), created_at: '2026-11-11T21:50:00Z' }];
+    expect(recentCustomerText(largo, now)).toHaveLength(3000);
+  });
+
+  it('when it has to cut, keeps the newest messages (the end of the chat)', () => {
+    const filas2 = [
+      { content_text: 'a'.repeat(3500), created_at: '2026-11-11T21:40:00Z' },
+      { content_text: 'direccion final', created_at: '2026-11-11T21:50:00Z' },
+    ];
+    const texto = recentCustomerText(filas2, now);
+    expect(texto).toHaveLength(3000);
+    expect(texto.endsWith('direccion final')).toBe(true);
   });
 });
 

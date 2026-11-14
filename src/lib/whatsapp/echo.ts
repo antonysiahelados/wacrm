@@ -65,7 +65,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * What the customer wrote in the last 24 h, oldest first, as one string
- * of at most 1000 characters. `rows` are customer messages in any order.
+ * of at most 3000 characters. `rows` are customer messages in any order.
  */
 export function recentCustomerText(
   rows: Array<{ content_text: string | null; created_at: string }>,
@@ -79,7 +79,7 @@ export function recentCustomerText(
     .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
     .map((r) => r.content_text as string)
     .join('\n')
-    .slice(0, 1000);
+    .slice(-3000);
 }
 
 export interface AgentEventInput {

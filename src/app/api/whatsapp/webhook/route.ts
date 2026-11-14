@@ -427,7 +427,7 @@ async function processEcho(echo: Echo, accountId: string, ownerId: string) {
     .eq('sender_type', 'customer')
     .gte('created_at', new Date(nowMs - 24 * 60 * 60 * 1000).toISOString())
     .order('created_at', { ascending: false })
-    .limit(10)
+    .limit(40)
   const rows = (recent ?? []) as Array<{
     content_text: string | null
     created_at: string
@@ -445,7 +445,7 @@ async function processEcho(echo: Echo, accountId: string, ownerId: string) {
       referencias: extractReferencias(
         rows.map((r) => r.content_text ?? '')
       ),
-      customerText: recentCustomerText(rows.slice(0, 5), nowMs),
+      customerText: recentCustomerText(rows, nowMs),
     })
   )
 }
